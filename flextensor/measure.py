@@ -9,7 +9,6 @@ def verify_code(mod, target, dev_id):
     if target == "cuda":
         ctx = tvm.nd.device(target, dev_id)  # just use device 0
         if not ctx.exist:
-            # print("Fail to get device %s devid=%d"%(target, dev_id))
             return False
         max_dims = ctx.max_thread_dimensions
         check_gpu = {
@@ -88,9 +87,10 @@ def build_and_eval(lib, s, bufs, target, dev_id, rpc_info: RpcInfo = None, numbe
 
     tvm_arys = []
     try:
-        func.export_library(lib, fcompile)
+        func.export_library(lib, fcompile=fcompile)
         # print("Connecting...")
-        remote = rpc_info.get_remote()
+        # remote = rpc_info.get_remote()
+        remote = None
         # print("Allocating...")
         ctx = (remote if remote else tvm).device(target, dev_id)
         for buf in bufs:

@@ -453,6 +453,10 @@ class WalkerGroup(object):
         if not inputs:
             return []
         perf_lst = self.performance_judger(torch.FloatTensor(inputs)).reshape(-1)
+        for i, item in enumerate(perf_lst):
+            if item == 0:
+                perf_lst[i] = float('inf')
+                
         return perf_lst.detach().tolist()
 
     def load_performance_judger(self, model_path):

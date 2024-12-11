@@ -87,15 +87,15 @@ def normalize_perf_data(dataset):
     # normalize
     max_val = 0.0
     min_val = float("inf")
-    for data in dataset[:]:
-        for val in data[1]:
-            if val != float("inf"):
-                if val > max_val:
-                    max_val = val
-                elif val < min_val:
-                    min_val = val
+    for data in dataset:
+        val = data[1][0]
+        if val != float("inf"):
+            if val > max_val:
+                max_val = val
+            elif val < min_val:
+                min_val = val
     interval = max(max_val - min_val, 1e-5)
-    for data in dataset[:]:
+    for data in dataset:
         # filter empty data
         if len(data[0]) <= 0:
             continue
@@ -108,15 +108,15 @@ def normalize_perf_data(dataset):
         #         elif data[1][i] < min_val:
         #             min_val = data[1][i]
         # interval = max(max_val - min_val, 1e-5)
-        for i in range(len(data[1])):
-            new_data = []
-            new_data.append(copy.deepcopy(data[0][i]))
-            new_data.append(copy.deepcopy(data[1][i]))
-            if data[1][i] == float("inf"):
-                new_data[1] = 1000.0
-            # else:
-            #     new_data[1] = (data[1][i] - min_val) / interval
-            data_lst.append(new_data)
+        features = data[0]  # 전체 입력값
+        label = data[1][0]  # 출력값
+        # 정규화된 출력값 계산
+        if label == float("inf"):
+            norm_label = 1000.0
+        else:
+            norm_label = (label - min_val) / interval
+        # 정규화된 데이터를 추가
+        data_lst.append([features, norm_label])
     return data_lst
 
 
@@ -313,9 +313,9 @@ if __name__ == "__main__":
     parser.add_argument("-t", "--type", help="Type of training `perf` of `q`", type=str, default="perf")
     parser.add_argument("-d", "--data", help="Path to train data", type=str, default="")
     parser.add_argument("-m", "--model", help="Path to model", type=str, default="model.pkl")
-    parser.add_argument("--epoch", type=int, default=10)
-    parser.add_argument("--batch", type=int, default=1)
-    parser.add_argument("--lr", type=float, default=0.02)
+    parser.add_argument("--epoch", type=int, default=100)
+    parser.add_argument("--batch", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--override", action="store_true")
     parser.add_argument("--ratio", type=float, default=0.8)
 

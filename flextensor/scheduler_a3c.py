@@ -25,6 +25,9 @@ from functools import partial
 from tempfile import mkstemp, mkdtemp
 from .space import Space
 
+from flextensor.a3c_utils import A3CNetwork, A3CWorker, A3CStateSpace
+import torch.optim as optim
+
 try:
     import psutil
 except ImportError:
@@ -220,7 +223,7 @@ class Scheduler(object):
         self._pool = None
 
     def _warm_up(self, warm_up_epoches, warm_up_trials, configs: List[Config], type_keys, max_repeat=20,
-                 use_model=True):
+                 use_model=False):
         # perform warmup
         warm_up_enough = False
         count_repeat = 0
@@ -279,6 +282,37 @@ class Scheduler(object):
                 warm_up_enough = True
         self.timeout = old_timeout
 
+    def _a3c_schedule(self, configs, type_keys, use_model=False):
+        # Initialize state space
+        state_space = A3CStateSpace(self.space)
+
+        # Initialize global A3C model
+        global_model = A3CNetwork(state_space.state_dim, state_space.action_dim)
+        optimizer = optim.Adam(global_model.parameters(), lr=1e-4)
+
+        # Create A3C workers
+        workers = []
+        for i in range(self.parallel):
+            worker = A3CWorker(
+                worker_id=i,
+                global_model=global_model,
+                optimizer=optimizer,
+                state_space=state_space,
+                configs=self,
+            )
+            workers.append(worker)
+
+        # Start all workers
+        for worker in workers:
+            worker.start()
+
+        # Wait for all workers to complete
+        for worker in workers:
+            worker.join()
+
+        # Return the best configuration found
+        return self.walker_group.to_config(self.walker_group.top1())
+        
     def _random_schedule(self, configs, type_keys, use_model=False):
         # prepare model
         if use_model:
@@ -290,7 +324,7 @@ class Scheduler(object):
             self._warm_up(warm_up_epoches, warm_up_trials, configs, type_keys, use_model=use_model)
         return self.walker_group.to_config(self.walker_group.top1())
 
-    def _searching_schedule(self, configs: Config, type_keys, use_model=True):
+    def _searching_schedule(self, configs: Config, type_keys, use_model=False):
         # prepare model
         if use_model:
             self.walker_group.load_or_create_model()
@@ -441,7 +475,7 @@ class Scheduler(object):
             best = minimal[0]
         return self.walker_group.to_config(best)
 
-    def _q_schedule(self, configs, type_keys, use_model=True):
+    def _q_schedule(self, configs, type_keys, use_model=False):
         # prepare model
         self.walker_group.load_walker_model()
         if use_model:
@@ -773,8 +807,7 @@ class OpScheduler(Scheduler):
                                           early_stop, rpc_info, rewrite=rewrite)
         self.op_pos = op_pos
 
-    def schedule(self, configs, method="searching", use_model=True, perf_path=None):
-        print("use_model: ", use_model)
+    def schedule(self, configs, method="searching", use_model=False, perf_path=None):
         # if hint == "split_fuse":
         #     wanted_types = ["spatial", "reduce", "unroll"]
         # elif hint == "fuse_split":
@@ -790,6 +823,8 @@ class OpScheduler(Scheduler):
             return self._q_schedule(configs, wanted_types, use_model=use_model)
         elif method == "random":
             return self._random_schedule(configs, wanted_types, use_model=use_model)
+        elif method == "a3c":
+            return self._a3c_schedule(configs, wanted_types, use_model=use_model)
         else:
             raise RuntimeError("Currently no support for method %s" % method)
 
@@ -869,18 +904,19 @@ class GraphScheduler(Scheduler):
                                              number, early_stop,
                                              rpc_info, rewrite=rewrite)
 
-    def schedule(self, configs, method="searching", use_model=True, perf_path=None):
+    def schedule(self, configs, method="searching", use_model=False, perf_path=None):
         if perf_path is not None:
             self.walker_group.model_path = perf_path
-        # if method == "searching":
-        #     return self._searching_schedule(configs, ["inline", "merge"], use_model=use_model)
-        # elif method == "q":
-        #     return self._q_schedule(configs, ["inline", "merge"], use_model=use_model)
-        # elif method == "random":
-        #     return self._random_schedule(configs, ["inline", "merge"], use_model=use_model)
-        # else:
-        #     raise RuntimeError("Currently no support for method %s" % method)
-        return self._searching_schedule(configs, ["inline", "merge"], use_model=use_model)
+        if method == "searching":
+            return self._searching_schedule(configs, ["inline", "merge"], use_model=use_model)
+        elif method == "q":
+            return self._q_schedule(configs, ["inline", "merge"], use_model=use_model)
+        elif method == "random":
+            return self._random_schedule(configs, ["inline", "merge"], use_model=use_model)
+        elif method == "a3c":
+            return self._a3c_schedule(configs, ["inline", "merge"], use_model=use_model)
+        else:
+            raise RuntimeError("Currently no support for method %s" % method)
 
     def parallel_evaluate(self, configs, graph_configs, number=1):
         return self._parallel_evaluate(configs, graph_configs, mode="graph", number=number)
@@ -1058,10 +1094,8 @@ def schedule(task_key, slevel=4, rlevel=3, op_trial=50, graph_trial=10, op_stop=
         )
         # print("###########################################")
         # print("Scheduling", op)
-        # use_model = False if op_perf_model_path_lst[pos] is None else True
-        # perf_path = op_perf_model_path_lst[pos]
-        use_model = True
-        perf_path = "/flex/FlexTensor/flextensor/model.pkl"
+        use_model = False if op_perf_model_path_lst[pos] is None else True
+        perf_path = op_perf_model_path_lst[pos]
         if force_inline and graph_space.subspaces["inline"].able_inline(pos):
             op_config = {}
         else:
@@ -1134,7 +1168,7 @@ def schedule_with_config(task_key, configs, op_pos=None, rewrite=False):
     return s, bufs
 
 
-def schedule_with_config_ops(ops, bufs, configs: Config, op_pos=None, target="cuda"):
+def schedule_with_config_ops(ops, bufs, configs: Config, op_pos=None, target="llvm"):
     """Schedule a task with given configs
 
     perform sequential schedule
@@ -1169,9 +1203,6 @@ def schedule_with_config_ops(ops, bufs, configs: Config, op_pos=None, target="cu
     if graph_config is not None:
         graph_template = GraphScheduler.generate_graph_schedule(graph_config, phase="inline")
         graph_template(s, op_lst, op_states)
-    # for i in range(loop_length):
-    #     print(f"Config for op[{i}]: {op_config_lst[i]}")
-    #     print(f"spatial: {op_config_lst[i].get('spatial')}, reduce: {op_config_lst[i].get('reduce')}")
 
     ###################################################
     # perform intra operations schedule    
@@ -1182,7 +1213,6 @@ def schedule_with_config_ops(ops, bufs, configs: Config, op_pos=None, target="cu
             config = op_config_lst[i]
             # {"spatial": [[1, 2, 3], [3, 4, 5]], "reduce": [[1, 2, 3]], "unroll": [[0, 1]]}
             template = OpScheduler.generate_op_schedule(target, config)
-            # print(config)
             template(s, op, op_states[i])
 
             ###################################################
